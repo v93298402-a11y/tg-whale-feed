@@ -42,7 +42,7 @@ SEEN_LT_BUFFER = 500  # cap on per-source dedup set
 # we add them) can win the dedup race when they've also seen the sale.
 # After the delay, if no other source posted, Getgems falls back to
 # emitting with its own label.
-POST_DELAY_SEC = 180.0
+POST_DELAY_SEC = 120.0
 
 
 _stats = {
