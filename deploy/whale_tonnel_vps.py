@@ -45,8 +45,8 @@ from typing import TYPE_CHECKING
 from telethon import events
 from telethon.errors import FloodWaitError
 
-from whale_feed.whale_enrich import enrich_attributes
-from whale_feed.whale_types import WhaleSale, derive_slug
+from sniper.whale_enrich import enrich_attributes
+from sniper.whale_types import WhaleSale, derive_slug
 
 if TYPE_CHECKING:
     from telethon import TelegramClient
