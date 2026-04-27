@@ -60,6 +60,9 @@ logger = logging.getLogger(__name__)
 
 GIFT_THRESHOLD_TON = 100.0
 MRKT_CHANNEL = "giftwhalefeed"
+CATCHUP_INTERVAL_SEC = 300.0  # periodic sweep every 5 minutes
+CATCHUP_LIMIT = 50  # how many recent messages to re-check each sweep
+SEEN_IDS_MAX = 2000  # cap on seen message ID set to bound memory
 
 # Either of the two anchors works:
 #   * "GIFT SOLD!"  — @giftwhalefeed format (uppercase)
@@ -112,6 +115,8 @@ _stats: dict[str, int] = {
     "parse_errors": 0,
     "below_threshold": 0,
     "wrong_source": 0,
+    "catchup_sweeps": 0,
+    "catchup_recovered": 0,
 }
 
 
@@ -191,6 +196,106 @@ def parse_sale_message(text: str) -> WhaleSale | None:
     )
 
 
+async def _process_mrkt_message(
+    client: TelegramClient,
+    text: str,
+    msg_id: int,
+    threshold_ton: float,
+    on_sold: Callable[[WhaleSale], Awaitable[None]],
+) -> bool:
+    """Parse and forward one MRKT sale message.  Returns True if emitted."""
+    if _SOURCE_TAG_RE.search(text) is None:
+        _stats["wrong_source"] += 1
+        return False
+
+    try:
+        sale = parse_sale_message(text)
+    except Exception:
+        _stats["parse_errors"] += 1
+        logger.exception("MRKT: parser crashed on message %s", msg_id)
+        return False
+    if sale is None:
+        return False
+    _stats["sales_parsed"] += 1
+    if sale.price_ton < threshold_ton:
+        _stats["below_threshold"] += 1
+        return False
+
+    if not (sale.model and sale.symbol and sale.backdrop):
+        try:
+            await enrich_attributes(client, sale)
+        except Exception:
+            logger.exception("MRKT: enrich raised, posting partial sale")
+
+    _stats["whales_emitted"] += 1
+    logger.info(
+        "MRKT whale: %s @ %.2f TON (model=%s sym=%s bd=%s)",
+        sale.title,
+        sale.price_ton,
+        sale.model,
+        sale.symbol,
+        sale.backdrop,
+    )
+    try:
+        await on_sold(sale)
+    except Exception:
+        logger.exception("MRKT: on_sold callback raised")
+        return False
+    return True
+
+
+async def _catchup_loop(
+    client: TelegramClient,
+    entity: object,
+    on_sold: Callable[[WhaleSale], Awaitable[None]],
+    threshold_ton: float,
+    seen_ids: set[int],
+) -> None:
+    """Periodic sweep: re-read recent messages and process any missed ones.
+
+    The real-time ``NewMessage`` handler occasionally misses a post
+    (brief network hiccup, Telethon reconnect race, etc.). This loop
+    fetches the last ``CATCHUP_LIMIT`` messages every
+    ``CATCHUP_INTERVAL_SEC`` seconds and feeds any unseen ones through
+    the same pipeline. The poster's dedup cache prevents double-posting.
+    """
+    while True:
+        await asyncio.sleep(CATCHUP_INTERVAL_SEC)
+        try:
+            _stats["catchup_sweeps"] += 1
+            async for msg in client.iter_messages(entity, limit=CATCHUP_LIMIT):
+                if msg.id in seen_ids:
+                    continue
+                seen_ids.add(msg.id)
+                text = msg.message or ""
+                if not text:
+                    continue
+                if _ANCHOR_RE.search(text) is None:
+                    continue
+                emitted = await _process_mrkt_message(
+                    client, text, msg.id, threshold_ton, on_sold,
+                )
+                if emitted:
+                    _stats["catchup_recovered"] += 1
+                    logger.info(
+                        "MRKT catch-up recovered message %d", msg.id,
+                    )
+        except FloodWaitError as e:
+            logger.warning(
+                "MRKT catch-up: FloodWait %ds; skipping this sweep",
+                e.seconds,
+            )
+            await asyncio.sleep(e.seconds)
+        except Exception:
+            logger.exception("MRKT catch-up sweep failed")
+        finally:
+            # Bound memory: keep only the most recent message IDs.
+            if len(seen_ids) > SEEN_IDS_MAX:
+                cutoff = sorted(seen_ids)[-SEEN_IDS_MAX // 2 :]
+                seen_ids.clear()
+                seen_ids.update(cutoff)
+
+
 async def run_mrkt_feed(
     client: TelegramClient,
     on_sold: Callable[[WhaleSale], Awaitable[None]],
@@ -203,6 +308,11 @@ async def run_mrkt_feed(
     registers a NewMessage handler scoped to that channel. The handler
     parses each post; only posts tagged ``Sold on MRKT`` and at or
     above ``threshold_ton`` are forwarded to ``on_sold``.
+
+    A periodic catch-up loop also runs in the background: every
+    ``CATCHUP_INTERVAL_SEC`` seconds it re-reads the last
+    ``CATCHUP_LIMIT`` messages and processes any that the real-time
+    handler missed (e.g. due to brief network interruptions).
 
     The Telethon client must already be connected and authorised
     (i.e. the same client used by the rest of whale-feed). If the
@@ -232,53 +342,33 @@ async def run_mrkt_feed(
         threshold_ton,
     )
 
+    # Track message IDs seen by the real-time handler so the catch-up
+    # loop can skip them efficiently.
+    seen_ids: set[int] = set()
+
+    # Seed seen_ids with recent messages so the catch-up loop doesn't
+    # replay historical posts on startup.
+    try:
+        async for msg in client.iter_messages(entity, limit=CATCHUP_LIMIT):
+            seen_ids.add(msg.id)
+    except Exception:
+        logger.warning("MRKT: failed to seed seen_ids; catch-up may replay some posts")
+
     @client.on(events.NewMessage(chats=entity))
     async def _on_new_post(event):  # noqa: ANN001
         _stats["messages_seen"] += 1
+        seen_ids.add(event.message.id)
         text = event.message.message or ""
-
-        # Cheap pre-filter: skip posts that aren't tagged for MRKT
-        # without running the full parser. The aggregator channel
-        # mixes posts from several marketplaces.
-        if _SOURCE_TAG_RE.search(text) is None:
-            _stats["wrong_source"] += 1
-            return
-
-        try:
-            sale = parse_sale_message(text)
-        except Exception:
-            _stats["parse_errors"] += 1
-            logger.exception("MRKT: parser crashed on message %s", event.id)
-            return
-        if sale is None:
-            return
-        _stats["sales_parsed"] += 1
-        if sale.price_ton < threshold_ton:
-            _stats["below_threshold"] += 1
-            return
-
-        # Backfill any missing attributes — @giftwhalefeed already
-        # carries Model/Symbol/Backdrop in their posts, but enrich is
-        # cheap insurance against format drift or omitted Symbol.
-        if not (sale.model and sale.symbol and sale.backdrop):
-            try:
-                await enrich_attributes(client, sale)
-            except Exception:
-                logger.exception("MRKT: enrich raised, posting partial sale")
-
-        _stats["whales_emitted"] += 1
-        logger.info(
-            "MRKT whale: %s @ %.2f TON (model=%s sym=%s bd=%s)",
-            sale.title,
-            sale.price_ton,
-            sale.model,
-            sale.symbol,
-            sale.backdrop,
+        await _process_mrkt_message(
+            client, text, event.message.id, threshold_ton, on_sold,
         )
-        try:
-            await on_sold(sale)
-        except Exception:
-            logger.exception("MRKT: on_sold callback raised")
+
+    # Start catch-up loop in background.
+    asyncio.create_task(_catchup_loop(
+        client, entity, on_sold, threshold_ton, seen_ids,
+    ))
+    logger.info("MRKT catch-up loop started (every %.0fs, last %d msgs)",
+                CATCHUP_INTERVAL_SEC, CATCHUP_LIMIT)
 
     # Keep the wrapping task alive forever — the registered handler
     # runs on the client's main loop regardless of this coroutine's
