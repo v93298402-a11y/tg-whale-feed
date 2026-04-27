@@ -49,8 +49,8 @@ from typing import TYPE_CHECKING
 from telethon import events
 from telethon.errors import FloodWaitError
 
-from whale_feed.whale_enrich import enrich_attributes
-from whale_feed.whale_types import WhaleSale, derive_slug
+from sniper.whale_enrich import enrich_attributes
+from sniper.whale_types import WhaleSale, derive_slug
 
 if TYPE_CHECKING:
     from telethon import TelegramClient
@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 GIFT_THRESHOLD_TON = 100.0
 MRKT_CHANNEL = "giftwhalefeed"
-CATCHUP_INTERVAL_SEC = 300.0  # periodic sweep every 5 minutes
+CATCHUP_INTERVAL_SEC = 120.0  # periodic sweep every 2 minutes
 CATCHUP_LIMIT = 50  # how many recent messages to re-check each sweep
 SEEN_IDS_MAX = 2000  # cap on seen message ID set to bound memory
 
@@ -75,9 +75,9 @@ _SOURCE_TAG_RE = re.compile(r"Sold\s+on\s+MRKT\b", re.IGNORECASE)
 # "Title #12345" — accepts letters, digits, spaces, hyphens, apostrophes,
 # dots in the title. Matches first occurrence after the anchor.
 # Accept typographic apostrophes (U+2019, U+2018, U+02BC) in addition
-# to ASCII '\''; without them "Durov’s Cap" parses as just "s Cap".
+# to ASCII '\''; without them "Durov's Cap" parses as just "s Cap".
 _TITLE_RE = re.compile(
-    r"([A-Za-z][A-Za-z0-9 .'’‘ʼ\-]*?)\s*#\s*(\d+)",
+    r"([A-Za-z][A-Za-z0-9 .'''\u02bc\-]*?)\s*#\s*(\d+)",
 )
 # "Price: 158.0 TON (~$206.98)" / "Price: 142.97 TON" / "😋Price:142.97 TON".
 # Tolerates missing/extra whitespace and stray emoji or pipes preceding
@@ -130,7 +130,7 @@ def _clean_attr(s: str | None) -> str | None:
         return None
     s = s.strip()
     s = _RARITY_PAREN_RE.sub("", s)
-    s = s.strip(" -·.,;:├└|")
+    s = s.strip(" -\u00b7.,;:\u251c\u2514|")
     return s or None
 
 
@@ -253,11 +253,11 @@ async def _catchup_loop(
 ) -> None:
     """Periodic sweep: re-read recent messages and process any missed ones.
 
-    The real-time ``NewMessage`` handler occasionally misses a post
+    The real-time NewMessage handler occasionally misses a post
     (brief network hiccup, Telethon reconnect race, etc.). This loop
-    fetches the last ``CATCHUP_LIMIT`` messages every
-    ``CATCHUP_INTERVAL_SEC`` seconds and feeds any unseen ones through
-    the same pipeline. The poster's dedup cache prevents double-posting.
+    fetches the last CATCHUP_LIMIT messages every CATCHUP_INTERVAL_SEC
+    seconds and feeds any unseen ones through the same pipeline.
+    The poster's dedup cache prevents double-posting.
     """
     while True:
         await asyncio.sleep(CATCHUP_INTERVAL_SEC)
@@ -310,9 +310,9 @@ async def run_mrkt_feed(
     above ``threshold_ton`` are forwarded to ``on_sold``.
 
     A periodic catch-up loop also runs in the background: every
-    ``CATCHUP_INTERVAL_SEC`` seconds it re-reads the last
-    ``CATCHUP_LIMIT`` messages and processes any that the real-time
-    handler missed (e.g. due to brief network interruptions).
+    CATCHUP_INTERVAL_SEC seconds it re-reads the last CATCHUP_LIMIT
+    messages and processes any that the real-time handler missed
+    (e.g. due to brief network interruptions).
 
     The Telethon client must already be connected and authorised
     (i.e. the same client used by the rest of whale-feed). If the
@@ -354,14 +354,16 @@ async def run_mrkt_feed(
     except Exception:
         logger.warning("MRKT: failed to seed seen_ids; catch-up may replay some posts")
 
-    @client.on(events.NewMessage(chats=entity))
-    async def _on_new_post(event):  # noqa: ANN001
+    async def _handle(event):  # noqa: ANN001
         _stats["messages_seen"] += 1
         seen_ids.add(event.message.id)
         text = event.message.message or ""
         await _process_mrkt_message(
             client, text, event.message.id, threshold_ton, on_sold,
         )
+
+    client.add_event_handler(_handle, events.NewMessage(chats=entity))
+    client.add_event_handler(_handle, events.MessageEdited(chats=entity))
 
     # Start catch-up loop in background.
     asyncio.create_task(_catchup_loop(
