@@ -3,7 +3,9 @@
 Runs the multi-source whale-feed monitor. Sources:
 
   * TonCenter — on-chain monitoring via TonCenter REST API v3 (replaces
-    the old Telegram Resale polling). Enabled if ``TONCENTER_API_KEY`` is set.
+    the old Telegram Resale polling). Enabled by default; disable with
+    ``WHALE_TONCENTER_ENABLED=0``.  Optional ``TONCENTER_API_KEY`` for
+    higher rate limits.
   * Getgems  — enabled if ``GETGEMS_API_KEY`` is set.
   * Fragment — enabled by default; disable with ``WHALE_FRAGMENT_ENABLED=0``.
   * MRKT     — enabled by default; disable with ``WHALE_MRKT_ENABLED=0``.
@@ -70,7 +72,8 @@ async def _run(threshold_ton: float) -> None:
         logger.error("WHALE_CHANNEL not set in .env — cannot start")
         sys.exit(1)
 
-    toncenter_key = os.getenv("TONCENTER_API_KEY", "").strip()
+    toncenter_enabled = _env_flag("WHALE_TONCENTER_ENABLED")
+    toncenter_key = os.getenv("TONCENTER_API_KEY", "").strip() or None
     getgems_key = os.getenv("GETGEMS_API_KEY", "").strip()
     fragment_enabled = _env_flag("WHALE_FRAGMENT_ENABLED")
     mrkt_enabled = _env_flag("WHALE_MRKT_ENABLED")
@@ -111,8 +114,12 @@ async def _run(threshold_ton: float) -> None:
 
     tasks: list[asyncio.Task] = []
 
-    if toncenter_key:
-        logger.info("TonCenter source enabled (on-chain NFT purchase monitoring).")
+    if toncenter_enabled:
+        logger.info(
+            "TonCenter source enabled (on-chain NFT purchase monitoring, "
+            "api_key=%s).",
+            "present" if toncenter_key else "absent (free tier)",
+        )
         tasks.append(
             asyncio.create_task(
                 run_toncenter_feed(
@@ -125,7 +132,7 @@ async def _run(threshold_ton: float) -> None:
         )
     else:
         logger.info(
-            "TonCenter source disabled — set TONCENTER_API_KEY in .env to enable.",
+            "TonCenter source disabled (WHALE_TONCENTER_ENABLED=0).",
         )
 
     if getgems_key:
