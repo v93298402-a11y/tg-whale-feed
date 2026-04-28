@@ -7,12 +7,12 @@ for ``nft_purchase`` events and filters for Telegram-gift NFTs
 
 Advantages over the previous Telegram-Resale approach:
 
-* **100 % accuracy** — every on-chain sale is an ``nft_purchase`` action;
+* **100 % accuracy** вЂ” every on-chain sale is an ``nft_purchase`` action;
   no disappearance heuristics, no top-N limitation.
-* **Correct marketplace attribution** — the ``marketplace`` field in the
-  action tells us exactly where the sale happened (Fragment, Getgems, …).
-* **No Telegram API FloodWait** — uses a plain HTTPS REST call.
-* **Low latency** — polls every 30 s; new sales appear within one cycle.
+* **Correct marketplace attribution** вЂ” the ``marketplace`` field in the
+  action tells us exactly where the sale happened (Fragment, Getgems, вЂ¦).
+* **No Telegram API FloodWait** вЂ” uses a plain HTTPS REST call.
+* **Low latency** вЂ” polls every 30 s; new sales appear within one cycle.
 
 Requires ``TONCENTER_API_KEY`` env variable (free key from
 https://tonconsole.com).  Works without it too, but at a lower rate
@@ -42,17 +42,18 @@ ACTIONS_PATH = "/actions"
 NFT_ITEMS_PATH = "/nft/items"
 POLL_INTERVAL_SEC = 30.0
 HTTP_TIMEOUT_SEC = 20.0
+RATE_LIMIT_PAUSE = 1.1  # seconds between TonCenter API calls (free tier: 1 RPS)
 NANOTON = 1_000_000_000
 WHALE_THRESHOLD_TON = 100.0
 COLLECTION_CACHE_MAX = 500
 FRAGMENT_URI_PREFIX = "https://nft.fragment.com/"
 SEEN_ACTIONS_MAX = 5000
 
-# Map TonCenter's ``marketplace`` field to a human label for the poster.
-_MARKETPLACE_LABELS: dict[str | None, str] = {
-    "getgems": "Getgems",
-    "fragment": "Fragment",
-}
+# Marketplaces that already have their own dedicated source modules.
+# Sales on these are skipped by TonCenter to avoid duplicates вЂ” the
+# specialised sources post them with richer details anyway.
+_SKIP_MARKETPLACES: frozenset[str] = frozenset({"getgems", "fragment"})
+
 _DEFAULT_MARKETPLACE = "Telegram"
 
 # ---------------------------------------------------------------------------
@@ -81,6 +82,7 @@ _stats: dict[str, int] = {
     "whales_emitted": 0,
     "non_gift_skipped": 0,
     "below_threshold": 0,
+    "marketplace_skipped": 0,
     "resolve_errors": 0,
     "http_errors": 0,
 }
@@ -137,6 +139,7 @@ async def _resolve_nft_item(
     nft_item_address: str,
 ) -> dict | None:
     """Fetch a single NFT item from TonCenter. Returns the item dict."""
+    await asyncio.sleep(RATE_LIMIT_PAUSE)
     url = TONCENTER_API_BASE + NFT_ITEMS_PATH
     params = {"address": nft_item_address, "limit": "1"}
     resp = await client.get(url, headers=_headers(api_key), params=params)
@@ -169,7 +172,7 @@ async def _resolve_collection(
     collection.  Returns ``_CollectionInfo`` or ``None`` (non-gift NFT).
 
     Fetches the item metadata JSON from Fragment to get the canonical
-    collection title (e.g. "Plush Pepe #1" → "Plush Pepe").
+    collection title (e.g. "Plush Pepe #1" в†’ "Plush Pepe").
     """
     try:
         item = await _resolve_nft_item(client, api_key, nft_item_address)
@@ -194,7 +197,7 @@ async def _resolve_collection(
     # Fetch the metadata JSON from Fragment to get the real title.
     meta = await _fetch_gift_metadata(client, uri)
     if meta and meta.get("name"):
-        # name is like "Plush Pepe #1" — strip the number suffix.
+        # name is like "Plush Pepe #1" вЂ” strip the number suffix.
         raw_name = meta["name"]
         title_match = _NAME_NUM_RE.match(raw_name)
         title = title_match.group("title").strip() if title_match else raw_name
@@ -273,7 +276,7 @@ async def run_toncenter_feed(
                         )
                     except Exception:
                         # Resolution failed (rate limit, network, etc.)
-                        # — skip but do NOT cache so we retry next cycle.
+                        # вЂ” skip but do NOT cache so we retry next cycle.
                         continue
                     collection_cache[coll_addr] = info
                     # Bound cache size
@@ -286,10 +289,20 @@ async def run_toncenter_feed(
                     _stats["non_gift_skipped"] += 1
                     continue
 
-                marketplace = details.get("marketplace")
-                source = _MARKETPLACE_LABELS.get(
-                    marketplace, marketplace or _DEFAULT_MARKETPLACE,
-                )
+                marketplace = details.get("marketplace") or ""
+
+                # Skip sales from marketplaces that have their own
+                # dedicated source modules (Getgems, Fragment, etc.).
+                if marketplace.lower() in _SKIP_MARKETPLACES:
+                    _stats["marketplace_skipped"] += 1
+                    logger.debug(
+                        "Skipping %s sale (covered by dedicated source): "
+                        "%s @ %.1f TON",
+                        marketplace, coll_info.title, price_ton,
+                    )
+                    continue
+
+                source = marketplace.title() if marketplace else _DEFAULT_MARKETPLACE
 
                 # Fetch the NFT item to get the real gift number from
                 # the content URI (the on-chain index is a hash, not the
@@ -326,6 +339,14 @@ async def run_toncenter_feed(
                 except Exception:
                     logger.debug(
                         "Could not fetch item details for %s", nft_item_addr,
+                    )
+
+                if not num:
+                    _stats["resolve_errors"] += 1
+                    logger.warning(
+                        "TonCenter sale without gift number: "
+                        "%s @ %.1f TON (nft=%s) вЂ” posting anyway",
+                        coll_info.title, price_ton, nft_item_addr,
                     )
 
                 slug = f"{coll_info.slug_prefix}-{num}" if num else None
