@@ -2,7 +2,10 @@
 
 Runs the multi-source whale-feed monitor. Sources:
 
-  * Telegram Resale (Telethon polling, always on).
+  * TonCenter — on-chain monitoring via TonCenter REST API v3 (replaces
+    the old Telegram Resale polling). Enabled by default; disable with
+    ``WHALE_TONCENTER_ENABLED=0``.  Optional ``TONCENTER_API_KEY`` for
+    higher rate limits.
   * Getgems  — enabled if ``GETGEMS_API_KEY`` is set.
   * Fragment — enabled by default; disable with ``WHALE_FRAGMENT_ENABLED=0``.
   * MRKT     — enabled by default; disable with ``WHALE_MRKT_ENABLED=0``.
@@ -27,8 +30,6 @@ from telethon import TelegramClient
 
 from whale_feed.auth import get_portals_token
 from whale_feed.config import get_api_hash, get_api_id, get_session_name
-from whale_feed.whale_feed import get_stats as get_telegram_stats
-from whale_feed.whale_feed import run_whale_feed
 from whale_feed.whale_fragment import get_stats as get_fragment_stats
 from whale_feed.whale_fragment import run_fragment_feed
 from whale_feed.whale_getgems import get_stats as get_getgems_stats
@@ -38,6 +39,8 @@ from whale_feed.whale_mrkt import run_mrkt_feed
 from whale_feed.whale_portals import get_stats as get_portals_stats
 from whale_feed.whale_portals import run_portals_feed
 from whale_feed.whale_poster import create_whale_poster
+from whale_feed.whale_toncenter import get_stats as get_toncenter_stats
+from whale_feed.whale_toncenter import run_toncenter_feed
 from whale_feed.whale_tonnel import get_stats as get_tonnel_stats
 from whale_feed.whale_tonnel import run_tonnel_feed
 
@@ -69,6 +72,8 @@ async def _run(threshold_ton: float) -> None:
         logger.error("WHALE_CHANNEL not set in .env — cannot start")
         sys.exit(1)
 
+    toncenter_enabled = _env_flag("WHALE_TONCENTER_ENABLED")
+    toncenter_key = os.getenv("TONCENTER_API_KEY", "").strip() or None
     getgems_key = os.getenv("GETGEMS_API_KEY", "").strip()
     fragment_enabled = _env_flag("WHALE_FRAGMENT_ENABLED")
     mrkt_enabled = _env_flag("WHALE_MRKT_ENABLED")
@@ -92,9 +97,9 @@ async def _run(threshold_ton: float) -> None:
 
     def _shutdown() -> None:
         logger.info(
-            "Whale feed shutting down… telegram=%s getgems=%s fragment=%s "
+            "Whale feed shutting down… toncenter=%s getgems=%s fragment=%s "
             "mrkt=%s portals=%s tonnel=%s",
-            get_telegram_stats(),
+            get_toncenter_stats(),
             get_getgems_stats(),
             get_fragment_stats(),
             get_mrkt_stats(),
@@ -108,12 +113,27 @@ async def _run(threshold_ton: float) -> None:
         loop.add_signal_handler(sig, _shutdown)
 
     tasks: list[asyncio.Task] = []
-    tasks.append(
-        asyncio.create_task(
-            run_whale_feed(client, on_sold=poster, threshold_ton=threshold_ton),
-            name="whale-telegram",
+
+    if toncenter_enabled:
+        logger.info(
+            "TonCenter source enabled (on-chain NFT purchase monitoring, "
+            "api_key=%s).",
+            "present" if toncenter_key else "absent (free tier)",
         )
-    )
+        tasks.append(
+            asyncio.create_task(
+                run_toncenter_feed(
+                    on_sold=poster,
+                    threshold_ton=threshold_ton,
+                    api_key=toncenter_key,
+                ),
+                name="whale-toncenter",
+            )
+        )
+    else:
+        logger.info(
+            "TonCenter source disabled (WHALE_TONCENTER_ENABLED=0).",
+        )
 
     if getgems_key:
         logger.info("Getgems source enabled (API key present).")
@@ -214,9 +234,9 @@ async def _run(threshold_ton: float) -> None:
     finally:
         await client.disconnect()
         logger.info(
-            "Whale feed disconnected. Final stats: telegram=%s getgems=%s "
+            "Whale feed disconnected. Final stats: toncenter=%s getgems=%s "
             "fragment=%s mrkt=%s portals=%s tonnel=%s",
-            get_telegram_stats(),
+            get_toncenter_stats(),
             get_getgems_stats(),
             get_fragment_stats(),
             get_mrkt_stats(),
@@ -229,7 +249,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="tg-whale-feed",
         description=(
-            "Post Telegram gift sales >= threshold TON across 6 marketplaces "
+            "Post Telegram gift sales >= threshold TON across 7 marketplaces "
             "to a Telegram channel."
         ),
     )

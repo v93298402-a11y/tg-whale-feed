@@ -1,7 +1,7 @@
 [project]
 name = "tg-whale-feed"
 version = "0.1.0"
-description = "Multi-source Telegram whale-feed: posts gift sales >= 100 TON across 6 marketplaces to a channel"
+description = "Multi-source Telegram whale-feed: posts gift sales >= 100 TON across 7 marketplaces to a channel"
 requires-python = ">=3.10"
 dependencies = [
     "telethon>=1.37",
