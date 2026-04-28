@@ -56,6 +56,17 @@ _SKIP_MARKETPLACES: frozenset[str] = frozenset({"fragment"})
 
 _DEFAULT_MARKETPLACE = "Telegram"
 
+# Delay (seconds) before publishing sales whose on-chain marketplace
+# field is "getgems".  Fragment sales also carry marketplace=getgems
+# on-chain (Fragment reuses the Getgems sale contract), so an immediate
+# post would always beat the Fragment HTML-scraper source and label the
+# sale "Sold on Getgems" instead of "Sold on Fragment".  The delay
+# gives the Fragment source (60 s poll) time to publish first with the
+# correct label; the poster's dedup cache then drops TonCenter's later
+# attempt.  Sales with an empty marketplace ("Telegram") are NOT
+# delayed -- they have no competing source.
+_GETGEMS_DELAY_SEC = 120.0
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -205,6 +216,47 @@ async def _resolve_collection(
         title = _title_from_slug(slug_prefix)
 
     return _CollectionInfo(title=title, slug_prefix=slug_prefix)
+
+
+# ---------------------------------------------------------------------------
+# Delayed emit helper
+# ---------------------------------------------------------------------------
+
+
+async def _delayed_emit(
+    sale: WhaleSale,
+    on_sold: Callable[[WhaleSale], Awaitable[None]],
+    delay_sec: float,
+    marketplace: str,
+) -> None:
+    """Wait *delay_sec* then call *on_sold*.
+
+    Used for ``marketplace=getgems`` sales so the Fragment source has
+    time to publish first with the correct label.  If Fragment already
+    posted by the time the delay expires, the poster's dedup cache will
+    silently drop this duplicate.
+    """
+    logger.info(
+        "TonCenter: delaying %s @ %.1f TON by %.0fs (marketplace=%s)",
+        sale.title,
+        sale.price_ton,
+        delay_sec,
+        marketplace,
+    )
+    await asyncio.sleep(delay_sec)
+    try:
+        await on_sold(sale)
+        _stats["whales_emitted"] += 1
+        logger.info(
+            "TonCenter WHALE (after delay): %s @ %.1f TON (marketplace=%s)",
+            sale.title,
+            sale.price_ton,
+            marketplace,
+        )
+    except Exception:
+        logger.exception(
+            "on_sold callback failed for %s", sale.title,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -369,19 +421,31 @@ async def run_toncenter_feed(
                     buyer_address=details.get("new_owner"),
                 )
 
-                try:
-                    await on_sold(sale)
-                    _stats["whales_emitted"] += 1
-                    logger.info(
-                        "TonCenter WHALE: %s @ %.1f TON (marketplace=%s)",
-                        sale.title,
-                        price_ton,
-                        marketplace,
+                if marketplace.lower() == "getgems":
+                    # Delay publication so the Fragment HTML-scraper
+                    # source can post first with the correct label when
+                    # the sale actually happened on Fragment (Fragment
+                    # sales also carry marketplace=getgems on-chain).
+                    asyncio.create_task(
+                        _delayed_emit(
+                            sale, on_sold, _GETGEMS_DELAY_SEC, marketplace,
+                        ),
+                        name=f"tc-delay-{sale.title}",
                     )
-                except Exception:
-                    logger.exception(
-                        "on_sold callback failed for %s", sale.title,
-                    )
+                else:
+                    try:
+                        await on_sold(sale)
+                        _stats["whales_emitted"] += 1
+                        logger.info(
+                            "TonCenter WHALE: %s @ %.1f TON (marketplace=%s)",
+                            sale.title,
+                            price_ton,
+                            marketplace,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "on_sold callback failed for %s", sale.title,
+                        )
 
             # Bound seen_action_ids memory
             if len(seen_action_ids) > SEEN_ACTIONS_MAX:

@@ -185,6 +185,8 @@ def create_whale_poster(
 
     async def post(sale: WhaleSale) -> None:
         key = sale.dedup_key
+
+        # Fast-path outside the lock to avoid unnecessary work.
         if dedup.seen(key):
             logger.info(
                 "Skipping duplicate %s sale: %s @ %.2f TON (key=%s)",
@@ -199,6 +201,20 @@ def create_whale_poster(
         text = _format_post(sale, usd)
 
         async with lock:
+            # Re-check after acquiring the lock: another coroutine may
+            # have posted the same sale while we were awaiting the USD
+            # rate or waiting for the lock.
+            if dedup.seen(key):
+                logger.info(
+                    "Skipping duplicate %s sale (caught inside lock): "
+                    "%s @ %.2f TON (key=%s)",
+                    sale.source,
+                    sale.title,
+                    sale.price_ton,
+                    key,
+                )
+                return
+
             now = asyncio.get_event_loop().time()
             wait = min_interval_sec - (now - state["last_sent"])
             if wait > 0:
