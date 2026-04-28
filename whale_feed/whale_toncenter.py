@@ -52,7 +52,7 @@ SEEN_ACTIONS_MAX = 5000
 # Marketplaces that already have their own dedicated source modules.
 # Sales on these are skipped by TonCenter to avoid duplicates вЂ” the
 # specialised sources post them with richer details anyway.
-_SKIP_MARKETPLACES: frozenset[str] = frozenset({"getgems", "fragment"})
+_SKIP_MARKETPLACES: frozenset[str] = frozenset({"fragment"})
 
 _DEFAULT_MARKETPLACE = "Telegram"
 
@@ -292,7 +292,7 @@ async def run_toncenter_feed(
                 marketplace = details.get("marketplace") or ""
 
                 # Skip sales from marketplaces that have their own
-                # dedicated source modules (Getgems, Fragment, etc.).
+                # dedicated source modules (Fragment).
                 if marketplace.lower() in _SKIP_MARKETPLACES:
                     _stats["marketplace_skipped"] += 1
                     logger.debug(

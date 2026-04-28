@@ -6,7 +6,9 @@ Runs the multi-source whale-feed monitor. Sources:
     the old Telegram Resale polling). Enabled by default; disable with
     ``WHALE_TONCENTER_ENABLED=0``.  Optional ``TONCENTER_API_KEY`` for
     higher rate limits.
-  * Getgems  — enabled if ``GETGEMS_API_KEY`` is set.
+  * Getgems  — handled by TonCenter (accurate on-chain marketplace
+    attribution instead of the dedicated Getgems source which labels
+    all on-chain sales as "Getgems" regardless of actual marketplace).
   * Fragment — enabled by default; disable with ``WHALE_FRAGMENT_ENABLED=0``.
   * MRKT     — enabled by default; disable with ``WHALE_MRKT_ENABLED=0``.
   * Portals  — enabled by default; disable with ``WHALE_PORTALS_ENABLED=0``.
@@ -33,7 +35,6 @@ from whale_feed.config import get_api_hash, get_api_id, get_session_name
 from whale_feed.whale_fragment import get_stats as get_fragment_stats
 from whale_feed.whale_fragment import run_fragment_feed
 from whale_feed.whale_getgems import get_stats as get_getgems_stats
-from whale_feed.whale_getgems import run_getgems_feed
 from whale_feed.whale_mrkt import get_stats as get_mrkt_stats
 from whale_feed.whale_mrkt import run_mrkt_feed
 from whale_feed.whale_portals import get_stats as get_portals_stats
@@ -135,21 +136,15 @@ async def _run(threshold_ton: float) -> None:
             "TonCenter source disabled (WHALE_TONCENTER_ENABLED=0).",
         )
 
+    # Getgems sales are now handled by TonCenter with accurate on-chain
+    # marketplace attribution.  The old dedicated Getgems source labelled
+    # every on-chain sale as "Sold on Getgems" regardless of the actual
+    # marketplace, because the Getgems REST API returns all on-chain sales.
     if getgems_key:
-        logger.info("Getgems source enabled (API key present).")
-        tasks.append(
-            asyncio.create_task(
-                run_getgems_feed(
-                    api_key=getgems_key,
-                    on_sold=poster,
-                    threshold_ton=threshold_ton,
-                ),
-                name="whale-getgems",
-            )
-        )
-    else:
         logger.info(
-            "Getgems source disabled — set GETGEMS_API_KEY in .env to enable.",
+            "GETGEMS_API_KEY is set but the dedicated Getgems source is "
+            "disabled — Getgems sales are now handled by TonCenter with "
+            "accurate marketplace attribution.",
         )
 
     if fragment_enabled:
