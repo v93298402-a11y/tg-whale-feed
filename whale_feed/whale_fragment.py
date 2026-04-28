@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 FRAGMENT_BASE = "https://fragment.com"
 SOLD_PATH = "/gifts?filter=sold&sort=listed&view=list"
 GIFT_THRESHOLD_TON = 100.0
-POLL_INTERVAL_SEC = 60.0
+POLL_INTERVAL_SEC = 30.0
 HTTP_TIMEOUT_SEC = 20.0
 # Fragment's ?filter=sold&sort=listed page reshuffles old gifts to the top
 # whenever they see any *listing-side* activity (re-list, transfer between

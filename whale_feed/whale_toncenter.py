@@ -61,11 +61,11 @@ _DEFAULT_MARKETPLACE = "Telegram"
 # on-chain (Fragment reuses the Getgems sale contract), so an immediate
 # post would always beat the Fragment HTML-scraper source and label the
 # sale "Sold on Getgems" instead of "Sold on Fragment".  The delay
-# gives the Fragment source (60 s poll) time to publish first with the
+# gives the Fragment source (30 s poll) time to publish first with the
 # correct label; the poster's dedup cache then drops TonCenter's later
 # attempt.  Sales with an empty marketplace ("Telegram") are NOT
 # delayed -- they have no competing source.
-_GETGEMS_DELAY_SEC = 120.0
+_GETGEMS_DELAY_SEC = 300.0
 
 # ---------------------------------------------------------------------------
 # Helpers
