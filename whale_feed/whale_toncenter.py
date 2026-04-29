@@ -56,13 +56,23 @@ _SKIP_MARKETPLACES: frozenset[str] = frozenset({"fragment"})
 
 _DEFAULT_MARKETPLACE = "Telegram"
 
-# Short delay (seconds) before checking Fragment's sold page for
-# marketplace=getgems sales.  Fragment needs a few seconds to reflect a
-# new sale on its collection sold page, so we wait briefly before
-# querying.  After the delay we actively check the page; if the gift
-# appears there the sale happened on Fragment (only Fragment-listed
-# gifts appear on Fragment's sold page).
-_GETGEMS_CHECK_DELAY_SEC = 60.0
+# Retry schedule (seconds between attempts) for checking Fragment's
+# collection sold page.  Fragment takes 1-5 minutes to reflect a new
+# sale on its page, so we poll multiple times.  The first successful
+# hit triggers an immediate emit as "Fragment"; if all attempts fail
+# the sale is emitted as "Getgems".
+_FRAGMENT_CHECK_INTERVALS: list[float] = [
+    30.0,   # 0:30
+    30.0,   # 1:00
+    30.0,   # 1:30
+    30.0,   # 2:00
+    30.0,   # 2:30
+    30.0,   # 3:00
+    30.0,   # 3:30
+    30.0,   # 4:00
+    30.0,   # 4:30
+    30.0,   # 5:00
+]
 
 FRAGMENT_SOLD_URL = "https://fragment.com/gifts/{collection}?filter=sold&sort=listed&view=list"
 _FRAGMENT_UA = (
@@ -260,34 +270,55 @@ async def _is_on_fragment_sold_page(
 async def _check_and_emit(
     sale: WhaleSale,
     on_sold: Callable[[WhaleSale], Awaitable[None]],
-    delay_sec: float,
     collection_slug: str,
     gift_num: int,
 ) -> None:
-    """Wait briefly, then check Fragment's sold page to determine the
-    real marketplace.  If the gift is listed on Fragment's sold page
-    the sale happened on Fragment; otherwise it stays as Getgems.
+    """Retry-check Fragment's sold page to determine the real marketplace.
+
+    Fragment takes 1-5 minutes to reflect a new sale on its collection
+    sold page.  We poll at intervals defined by
+    ``_FRAGMENT_CHECK_INTERVALS``.  The first successful hit labels the
+    sale as "Fragment" and emits immediately; if all attempts fail the
+    sale is emitted as "Getgems".
     """
+    total_wait = sum(_FRAGMENT_CHECK_INTERVALS)
     logger.info(
-        "TonCenter: will check Fragment for %s @ %.1f TON in %.0fs",
+        "TonCenter: will check Fragment for %s @ %.1f TON "
+        "(%d attempts over %.0fs)",
         sale.title,
         sale.price_ton,
-        delay_sec,
+        len(_FRAGMENT_CHECK_INTERVALS),
+        total_wait,
     )
-    await asyncio.sleep(delay_sec)
 
     if gift_num:
-        found = await _is_on_fragment_sold_page(collection_slug, gift_num)
-        if found:
-            sale.source = "Fragment"
-            logger.info(
-                "TonCenter: %s found on Fragment sold page → labelling Fragment",
+        for attempt, wait in enumerate(_FRAGMENT_CHECK_INTERVALS, 1):
+            await asyncio.sleep(wait)
+            found = await _is_on_fragment_sold_page(
+                collection_slug, gift_num,
+            )
+            if found:
+                sale.source = "Fragment"
+                logger.info(
+                    "TonCenter: %s found on Fragment sold page "
+                    "(attempt %d) → labelling Fragment",
+                    sale.title,
+                    attempt,
+                )
+                break
+            logger.debug(
+                "TonCenter: %s NOT on Fragment sold page "
+                "(attempt %d/%d)",
                 sale.title,
+                attempt,
+                len(_FRAGMENT_CHECK_INTERVALS),
             )
         else:
             logger.info(
-                "TonCenter: %s NOT on Fragment sold page → labelling Getgems",
+                "TonCenter: %s NOT on Fragment sold page after "
+                "%d attempts → labelling Getgems",
                 sale.title,
+                len(_FRAGMENT_CHECK_INTERVALS),
             )
 
     try:
@@ -475,7 +506,7 @@ async def run_toncenter_feed(
                     # Fragment-listed gifts appear there.
                     asyncio.create_task(
                         _check_and_emit(
-                            sale, on_sold, _GETGEMS_CHECK_DELAY_SEC,
+                            sale, on_sold,
                             coll_info.slug_prefix, num,
                         ),
                         name=f"tc-check-{sale.title}",
