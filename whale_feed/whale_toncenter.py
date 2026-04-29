@@ -56,16 +56,20 @@ _SKIP_MARKETPLACES: frozenset[str] = frozenset({"fragment"})
 
 _DEFAULT_MARKETPLACE = "Telegram"
 
-# Delay (seconds) before publishing sales whose on-chain marketplace
-# field is "getgems".  Fragment sales also carry marketplace=getgems
-# on-chain (Fragment reuses the Getgems sale contract), so an immediate
-# post would always beat the Fragment HTML-scraper source and label the
-# sale "Sold on Getgems" instead of "Sold on Fragment".  The delay
-# gives the Fragment source (30 s poll) time to publish first with the
-# correct label; the poster's dedup cache then drops TonCenter's later
-# attempt.  Sales with an empty marketplace ("Telegram") are NOT
-# delayed -- they have no competing source.
-_GETGEMS_DELAY_SEC = 300.0
+# Short delay (seconds) before checking Fragment's sold page for
+# marketplace=getgems sales.  Fragment needs a few seconds to reflect a
+# new sale on its collection sold page, so we wait briefly before
+# querying.  After the delay we actively check the page; if the gift
+# appears there the sale happened on Fragment (only Fragment-listed
+# gifts appear on Fragment's sold page).
+_GETGEMS_CHECK_DELAY_SEC = 60.0
+
+FRAGMENT_SOLD_URL = "https://fragment.com/gifts/{collection}?filter=sold&sort=listed&view=list"
+_FRAGMENT_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+)
+_FRAGMENT_GIFT_NUM_RE = re.compile(r"#(\d+)")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -219,39 +223,81 @@ async def _resolve_collection(
 
 
 # ---------------------------------------------------------------------------
-# Delayed emit helper
+# Fragment active-check helper
 # ---------------------------------------------------------------------------
 
 
-async def _delayed_emit(
+async def _is_on_fragment_sold_page(
+    collection_slug: str,
+    gift_num: int,
+) -> bool:
+    """Check Fragment's collection sold page for a specific gift.
+
+    Fragment's sold page only lists gifts that were sold *through*
+    Fragment.  If the gift appears there, the sale was on Fragment;
+    otherwise it was on Getgems.
+    """
+    url = FRAGMENT_SOLD_URL.format(collection=collection_slug)
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SEC) as client:
+            resp = await client.get(
+                url,
+                headers={"User-Agent": _FRAGMENT_UA},
+                follow_redirects=True,
+            )
+            resp.raise_for_status()
+    except Exception:
+        logger.warning(
+            "Fragment sold-page check failed for %s-%d",
+            collection_slug, gift_num,
+        )
+        return False
+
+    target = f"#{gift_num}"
+    return target in resp.text
+
+
+async def _check_and_emit(
     sale: WhaleSale,
     on_sold: Callable[[WhaleSale], Awaitable[None]],
     delay_sec: float,
-    marketplace: str,
+    collection_slug: str,
+    gift_num: int,
 ) -> None:
-    """Wait *delay_sec* then call *on_sold*.
-
-    Used for ``marketplace=getgems`` sales so the Fragment source has
-    time to publish first with the correct label.  If Fragment already
-    posted by the time the delay expires, the poster's dedup cache will
-    silently drop this duplicate.
+    """Wait briefly, then check Fragment's sold page to determine the
+    real marketplace.  If the gift is listed on Fragment's sold page
+    the sale happened on Fragment; otherwise it stays as Getgems.
     """
     logger.info(
-        "TonCenter: delaying %s @ %.1f TON by %.0fs (marketplace=%s)",
+        "TonCenter: will check Fragment for %s @ %.1f TON in %.0fs",
         sale.title,
         sale.price_ton,
         delay_sec,
-        marketplace,
     )
     await asyncio.sleep(delay_sec)
+
+    if gift_num:
+        found = await _is_on_fragment_sold_page(collection_slug, gift_num)
+        if found:
+            sale.source = "Fragment"
+            logger.info(
+                "TonCenter: %s found on Fragment sold page → labelling Fragment",
+                sale.title,
+            )
+        else:
+            logger.info(
+                "TonCenter: %s NOT on Fragment sold page → labelling Getgems",
+                sale.title,
+            )
+
     try:
         await on_sold(sale)
         _stats["whales_emitted"] += 1
         logger.info(
-            "TonCenter WHALE (after delay): %s @ %.1f TON (marketplace=%s)",
+            "TonCenter WHALE: %s @ %.1f TON (source=%s)",
             sale.title,
             sale.price_ton,
-            marketplace,
+            sale.source,
         )
     except Exception:
         logger.exception(
@@ -422,15 +468,17 @@ async def run_toncenter_feed(
                 )
 
                 if marketplace.lower() == "getgems":
-                    # Delay publication so the Fragment HTML-scraper
-                    # source can post first with the correct label when
-                    # the sale actually happened on Fragment (Fragment
-                    # sales also carry marketplace=getgems on-chain).
+                    # On-chain marketplace=getgems covers both real
+                    # Getgems sales AND Fragment sales (Fragment reuses
+                    # the Getgems sale contract).  We wait briefly then
+                    # check Fragment's collection sold page — only
+                    # Fragment-listed gifts appear there.
                     asyncio.create_task(
-                        _delayed_emit(
-                            sale, on_sold, _GETGEMS_DELAY_SEC, marketplace,
+                        _check_and_emit(
+                            sale, on_sold, _GETGEMS_CHECK_DELAY_SEC,
+                            coll_info.slug_prefix, num,
                         ),
-                        name=f"tc-delay-{sale.title}",
+                        name=f"tc-check-{sale.title}",
                     )
                 else:
                     try:
